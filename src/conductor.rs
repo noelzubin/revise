@@ -1,7 +1,7 @@
-use crate::sm2;
 use crate::store::{SqliteStore, Store, ID};
 use chrono::{DateTime, Duration, Utc};
 use colored::*;
+use fsrs::{MemoryState, FSRS};
 use std::fmt;
 use std::io::{stdin, stdout, Write};
 
@@ -15,69 +15,98 @@ impl Conductor<SqliteStore> {
         Conductor { store }
     }
 
-    pub fn add_item(&self, desc: &str) {
-        self.store.add_item(desc).unwrap();
+    pub fn add_deck(&self, name: &str) {
+        self.store.add_deck(name).unwrap();
     }
 
-    pub fn edit_item(&self, id: ID, desc: &str) {
-        self.store.edit_item(id, desc).unwrap();
+    pub fn list_decks(&self) {
+        let decks = self.store.list_decks().unwrap();
+        decks.iter().for_each(|deck| {
+            println!("{}.\t{}", deck.id, deck.name);
+        });
     }
 
-    pub fn view_item(&self, id: ID) {
-        let item = self.store.get_item(id).unwrap();
-        println!("{}", item);
+    pub fn add_card(&self, deck_id: ID, desc: &str) {
+        self.store.add_card(deck_id, desc).unwrap();
     }
 
-    pub fn remove_item(&self, id: ID) {
-        self.store.remove_item(id).unwrap();
-    }
+    // TODO: display as table
+    pub fn list_cards(&self, deck_id: Option<ID>, all: bool) {
+        let mut cards = self.store.get_cards().unwrap();
 
-    // TODO: display as table 
-    pub fn list_items(&self, qry: Option<String>) {
-        let mut items = self.store.get_items().unwrap();
-
-        if let Some(qry) = qry {
-            items = items.into_iter().filter(|item| item.desc.contains(&qry)).collect();
+        if let Some(deck_id) = deck_id {
+            cards = cards
+                .into_iter()
+                .filter(|card| card.deck_id == deck_id)
+                .collect();
         }
 
-        for item in items.iter() {
-            println!("{}\n", item);
+        if !all {
+            let now = Utc::now();
+            cards = cards
+                .into_iter()
+                .filter(|card| card.next_show_date < now)
+                .collect();
         }
+
+        for card in cards.into_iter().map(|mut c| {
+            // if listing all cards. show only first line of desc
+            c.desc = get_first_line(&c.desc);
+            c
+        }) {
+            println!("{}\n", card);
+        }
+    }
+
+    pub fn edit_card(&self, id: ID, desc: &str) {
+        self.store.edit_card(id, desc).unwrap();
+    }
+
+    pub fn view_card(&self, id: ID) {
+        let card = self.store.get_card(id).unwrap();
+        println!("{}", card);
+    }
+
+    pub fn remove_card(&self, id: ID) {
+        self.store.remove_card(id).unwrap();
     }
 
     pub fn review_by_id(&self, id: ID) {
-        let item = self.store.get_item(id).unwrap();
-        self.review_item(item);
+        let card = self.store.get_card(id).unwrap();
+        self.review_card(card);
     }
 
-    pub fn review(&self) {
-        let item = self.store.get_items().unwrap();
-        for item in item
+    pub fn review(&self, deck_id: ID) {
+        let cards = self.store.get_cards().unwrap();
+        for card in cards
             .into_iter()
-            .filter(|item| item.data.next_show_date < Utc::now())
+            .filter(|card| card.deck_id == deck_id)
+            .filter(|card| card.next_show_date < Utc::now())
         {
-            self.review_item(item);
+            self.review_card(card);
         }
     }
 
-    fn review_item(&self, item: Item) {
-        println!("{}", item);
+    fn review_card(&self, card: Card) {
+        println!("{}", card);
 
         let first_char = loop {
             let mut buf = String::new();
-            print!("input value: ");
+            print!("\ninput value (q:quit s:skip 0:again 1:hard 2:good 3:easy): ");
             stdout().flush().unwrap();
             stdin().read_line(&mut buf).unwrap();
             let buf = &buf.trim();
 
             let first_char = buf.chars().next().unwrap();
-            if buf.len() != 1 || "qs012345".find(first_char).is_none() {
+            if buf.len() != 1 || "qs0123".find(first_char).is_none() {
                 println!("invalid input");
                 continue;
             }
 
             break first_char;
         };
+
+        let last_review = self.store.get_last_review(card.id).unwrap();
 
         match first_char {
             'q' => {
@@ -89,85 +118,109 @@ impl Conductor<SqliteStore> {
             n => {
                 let n: u32 = n.to_digit(10).unwrap();
 
-                if n > 5 {
+                if n > 4 {
                     println!("invalid input");
                 }
 
+                let fsrs = FSRS::new(Some(&[])).unwrap();
+
+                let last_date = last_review
+                    .as_ref()
+                    .map(|lr| lr.review_time)
+                    .unwrap_or(card.created_at);
+
                 let now = Utc::now();
+                let days_elapsed = (now - last_date).num_days() as u32;
 
-                let prev = sm2::SmValue {
-                    repetitions: item.data.repetition,
-                    interval: item.data.interval,
-                    ease_factor: item.data.ease_factor,
+                let next_states = fsrs
+                    .next_states(
+                        last_review.as_ref().map(|r| MemoryState {
+                            difficulty: r.difficulty,
+                            stability: r.stability,
+                        }),
+                        0.9,
+                        days_elapsed,
+                    )
+                    .unwrap();
+
+                let next_state = match n {
+                    0 => next_states.again,
+                    1 => next_states.hard,
+                    2 => next_states.good,
+                    3 => next_states.easy,
+                    _ => panic!("invalid input"),
                 };
 
-                let value = sm2::calc(n, prev);
-
-                let new_item_data = ItemData {
-                    interval: value.interval,
-                    repetition: value.repetitions,
-                    ease_factor: value.ease_factor,
-                    next_show_date: now + Duration::days(value.interval),
-                };
-
-                let rev = Review {
-                    item_id: item.id,
+                let revision = Review {
+                    id: 0,
+                    card_id: card.id,
+                    difficulty: next_state.memory.difficulty,
+                    stability: next_state.memory.stability,
+                    interval: next_state.interval,
+                    last_interval: days_elapsed,
                     review_time: now,
                 };
 
+                self.store.add_review(revision).unwrap();
+                let next_show_date = now + Duration::days(next_state.interval as i64);
+                self.store.update_card(card.id, next_show_date).unwrap();
+
                 println!(
                     "next review date: {}",
-                    new_item_data
-                        .next_show_date
+                    next_show_date
                         .with_timezone(&chrono::Local)
                         .format("%Y-%m-%d %H:%M")
                         .to_string()
                 );
-
-                self.store.update_item(item.id, new_item_data).unwrap();
-                self.store.add_review(rev).unwrap();
             }
         }
     }
 }
 
 #[derive(Debug)]
-pub struct Item {
-    pub id: i64,
+pub struct Card {
+    pub id: ID,
+    pub deck_id: ID,
+    pub deck: String,
     pub desc: String,
+    pub next_show_date: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
-    pub data: ItemData,
 }
 
 #[derive(Debug)]
-pub struct ItemData {
-    pub interval: i64,
-    pub repetition: i64,
-    pub ease_factor: f64,
-    pub next_show_date: DateTime<Utc>,
+pub struct Deck {
+    pub id: ID,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
 }
 
 pub struct Review {
+    pub id: ID,
+    pub card_id: ID,
+    pub interval: u32,
+    pub last_interval: u32,
     pub review_time: DateTime<Utc>,
-    pub item_id: i64,
+    pub stability: f32,
+    pub difficulty: f32,
 }
 
-impl fmt::Display for Item {
+impl fmt::Display for Card {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}. {}\nease factor: {}\t interval: {} \t repetition: {}\nnext show date: {}",
+            "{}. \t[{}] {}\n\tnext show date: {}",
             self.id,
-            self.desc.bright_green().bold().underline(),
-            self.data.ease_factor.to_string().bold(),
-            self.data.interval.to_string().bold(),
-            self.data.repetition.to_string().bold(),
-            self.data
-                .next_show_date
+            self.deck.white().dimmed(),
+            self.desc.bright_green().bold(),
+            self.next_show_date
                 .with_timezone(&chrono::Local)
                 .format("%Y-%m-%d %H:%M")
                 .to_string()
                 .yellow()
         )
     }
+}
+
+fn get_first_line(s: &str) -> String {
+    s.lines().next().unwrap().to_string()
 }

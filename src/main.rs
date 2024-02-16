@@ -1,6 +1,5 @@
 mod conductor;
 mod error;
-mod sm2;
 mod store;
 
 use conductor::Conductor;
@@ -9,12 +8,35 @@ use structopt::StructOpt;
 
 #[derive(StructOpt)]
 enum Opt {
-    Add { desc: String },
-    Edit { id: ID, desc: String },
-    View { id: ID },
-    Remove { id: ID },
-    Review { id: Option<ID> },
-    List { qry: Option<String> },
+    CreateDeck {
+        name: String,
+    },
+    ListDecks,
+    Add {
+        deck: ID,
+        desc: String,
+    },
+    Edit {
+        id: ID,
+        desc: String,
+    },
+    View {
+        id: ID,
+    },
+    Remove {
+        id: ID,
+    },
+    Review {
+        deck_id: ID,
+    },
+    ReviewCard {
+        id: ID,
+    },
+    List {
+        deck_id: Option<ID>,
+        #[structopt(long)]
+        all: bool,
+    },
 }
 
 fn main() {
@@ -23,14 +45,17 @@ fn main() {
     let cond = Conductor::new();
 
     match opts {
-        Opt::Add { desc } => cond.add_item(&desc),
-        Opt::Edit { id, desc } => cond.edit_item(id, &desc),
-        Opt::View { id } => cond.view_item(id),
-        Opt::Remove { id } => cond.remove_item(id),
-        Opt::List { qry } => cond.list_items(qry),
-        Opt::Review { id } => match id {
-            Some(id) => cond.review_by_id(id),
-            None => cond.review(),
-        },
+        Opt::CreateDeck { name } => cond.add_deck(&name),
+        Opt::ListDecks => cond.list_decks(),
+        Opt::Add {
+            deck: deck_id,
+            desc,
+        } => cond.add_card(deck_id, &desc),
+        Opt::Edit { id, desc } => cond.edit_card(id, &desc),
+        Opt::View { id } => cond.view_card(id),
+        Opt::Remove { id } => cond.remove_card(id),
+        Opt::List { deck_id, all } => cond.list_cards(deck_id, all),
+        Opt::Review { deck_id } => cond.review(deck_id),
+        Opt::ReviewCard { id } => cond.review_by_id(id),
     }
 }

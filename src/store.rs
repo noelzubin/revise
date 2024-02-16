@@ -1,20 +1,22 @@
-use crate::conductor::{Item, ItemData, Review};
+use crate::conductor::{Card, Deck, Review};
 use crate::error::{ReviseError, ReviseResult};
-use crate::sm2;
-use chrono::Utc;
+use chrono::{Date, DateTime, Utc};
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
 
 pub type ID = i64;
 
 pub trait Store {
-    fn add_item(&self, desc: &str) -> ReviseResult<()>;
-    fn edit_item(&self, id: ID, desc: &str) -> ReviseResult<()>;
-    fn update_item(&self, id: ID, data: ItemData) -> ReviseResult<()>;
-    fn get_item(&self, id: ID) -> ReviseResult<Item>;
-    fn remove_item(&self, id: ID) -> ReviseResult<()>;
-    fn get_items(&self) -> ReviseResult<Vec<Item>>;
+    fn add_deck(&self, name: &str) -> ReviseResult<()>;
+    fn list_decks(&self) -> ReviseResult<Vec<Deck>>;
+    fn add_card(&self, deck_id: ID, desc: &str) -> ReviseResult<()>;
+    fn edit_card(&self, id: ID, desc: &str) -> ReviseResult<()>;
+    fn update_card(&self, id: ID, next_show_date: DateTime<Utc>) -> ReviseResult<()>;
+    fn get_card(&self, id: ID) -> ReviseResult<Card>;
+    fn remove_card(&self, id: ID) -> ReviseResult<()>;
+    fn get_cards(&self) -> ReviseResult<Vec<Card>>;
     fn add_review(&self, review: Review) -> ReviseResult<()>;
+    fn get_last_review(&self, card_id: ID) -> ReviseResult<Option<Review>>;
 }
 
 pub struct SqliteStore {
@@ -22,32 +24,41 @@ pub struct SqliteStore {
 }
 
 impl Store for SqliteStore {
-    fn add_item(&self, desc: &str) -> ReviseResult<()> {
-        let data = sm2::SmValue::inital();
-        let sql = "INSERT INTO items
-        (desc, repetition, interval, ease_factor, next_show_date, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6)";
+    fn add_deck(&self, name: &str) -> ReviseResult<()> {
+        let sql = "INSERT INTO decks
+        (name, created_at)
+        VALUES ($1, $2)";
 
         let now = Utc::now();
 
-        self.conn
-            .execute(
-                sql,
-                params![
-                    &desc,
-                    data.repetitions,
-                    data.interval,
-                    data.ease_factor,
-                    &now,
-                    &now
-                ],
-            )?;
+        self.conn.execute(sql, params![&name, &now])?;
 
         Ok(())
     }
 
-    fn edit_item(&self, id: i64, desc: &str) -> ReviseResult<()> {
-        let sql = "UPDATE items SET desc = $1 WHERE id = $2";
+    fn list_decks(&self) -> ReviseResult<Vec<Deck>> {
+        let sql = "SELECT id, name, created_at FROM decks";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([], Deck::from_row)?;
+        let decks = rows.collect::<rusqlite::Result<Vec<Deck>>>()?;
+        Ok(decks)
+    }
+
+    fn add_card(&self, deck_id: ID, desc: &str) -> ReviseResult<()> {
+        let sql = "INSERT INTO cards
+        (deck_id, desc, next_show_date, created_at)
+        VALUES ($1, $2, $3, $4)";
+
+        let now = Utc::now();
+
+        self.conn
+            .execute(sql, params![deck_id, &desc, &now, &now])?;
+
+        Ok(())
+    }
+
+    fn edit_card(&self, id: i64, desc: &str) -> ReviseResult<()> {
+        let sql = "UPDATE cards SET desc = $1 WHERE id = $2";
         let resp = self.conn.execute(sql, params![desc, &id])?;
 
         if resp == 0 {
@@ -57,53 +68,75 @@ impl Store for SqliteStore {
         Ok(())
     }
 
-    fn update_item(&self, id: i64, data: ItemData) -> ReviseResult<()> {
-        let sql = "UPDATE items SET repetition=$1, interval=$2, ease_factor=$3, next_show_date=$4 where id = $5";
+    fn update_card(&self, id: ID, next_show_date: DateTime<Utc>) -> ReviseResult<()> {
+        let sql = "UPDATE cards SET next_show_date=$1 where id = $2";
 
-        self.conn
-            .execute(
-                sql,
-                params![
-                    data.repetition,
-                    data.interval,
-                    data.ease_factor,
-                    data.next_show_date,
-                    id
-                ],
-            )?;
+        self.conn.execute(sql, params![next_show_date, id])?;
 
         Ok(())
     }
 
-    fn get_item(&self, id: i64) -> ReviseResult<Item> {
-        let sql = "SELECT id, desc, created_at, repetition, interval, ease_factor, next_show_date FROM items WHERE id = $1";
+    fn get_card(&self, id: i64) -> ReviseResult<Card> {
+        let sql = "
+        SELECT c.id, d.id deck_id, d.name deck_name, desc, next_show_date, c.created_at
+        FROM cards c JOIN decks d ON c.deck_id = d.id where c.id = $1
+        ";
         let mut stmt = self.conn.prepare(sql)?;
-        let mut rows = stmt.query_map([id], Item::from_row)?;
+        let mut rows = stmt.query_map([id], Card::from_row)?;
         let row = rows.next().unwrap()?;
         Ok(row)
     }
 
-    fn remove_item(&self, id: i64) -> ReviseResult<()> {
+    fn remove_card(&self, id: ID) -> ReviseResult<()> {
         self.conn
-            .execute("DELETE FROM items WHERE id=$1", &[&id])?;
+            .execute("DELETE FROM revlog WHERE card_id=$1", &[&id])?;
+        self.conn.execute("DELETE FROM cards WHERE id=$1", &[&id])?;
 
         Ok(())
     }
 
-    fn get_items(&self) -> ReviseResult<Vec<Item>> {
-        let sql = "SELECT id, desc, created_at, repetition, interval, ease_factor, next_show_date FROM items";
+    fn get_cards(&self) -> ReviseResult<Vec<Card>> {
+        let sql = "
+        SELECT c.id, d.id deck_id, d.name deck_name, desc, next_show_date, c.created_at
+        FROM cards c JOIN decks d ON c.deck_id = d.id
+        ";
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map([], Item::from_row)?;
-        let items = rows.collect::<rusqlite::Result<Vec<Item>>>()?;
+        let rows = stmt.query_map([], Card::from_row)?;
+        let items = rows.collect::<rusqlite::Result<Vec<Card>>>()?;
         Ok(items)
     }
 
     fn add_review(&self, review: Review) -> ReviseResult<()> {
-        let sql = "INSERT INTO reviews (review_time, item_id) VALUES ($1, $2)";
-        self.conn
-            .execute(sql, params![review.review_time, review.item_id])?;
+        let sql = "INSERT INTO revlog(card_id, last_interval, interval, review_time, stability, difficulty)
+        VALUES ($1, $2, $3, $4, $5, $6)";
+        self.conn.execute(
+            sql,
+            params![
+                review.card_id,
+                review.last_interval,
+                review.interval,
+                review.review_time,
+                review.stability,
+                review.difficulty
+            ],
+        )?;
 
         Ok(())
+    }
+
+    fn get_last_review(&self, card_id: ID) -> ReviseResult<Option<Review>> {
+        let sql = "
+        SELECT id, card_id, last_interval, interval, review_time, stability, difficulty 
+        FROM revlog 
+        WHERE card_id = $1 
+        ORDER BY id DESC 
+        LIMIT 1
+        ";
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map([card_id], Review::from_row)?;
+        let reviews = rows.collect::<rusqlite::Result<Vec<Review>>>()?;
+        Ok(reviews.into_iter().next())
     }
 }
 
@@ -112,32 +145,48 @@ impl SqliteStore {
         let conn = Connection::open(data_path()).unwrap();
 
         conn.execute(
-            "CREATE TABLE if not exists items (
-      id integer primary key autoincrement,
-      desc text NOT NULL,
-      repetition INTEGER NOT NULL,
-      interval INTEGER NOT NULL,
-      ease_factor real NOT NULL,
-      next_show_date text NOT NULL,
-      created_at text NOT NULL
-      )",
+            "
+        CREATE TABLE if not exists decks (
+            id integer primary key autoincrement,
+            name text NOT NULL,
+            created_at text NOT NULL
+        )",
             [],
         )
         .unwrap();
 
         conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS items_desc_key ON items(desc)",
+            "
+        CREATE TABLE if not exists cards (
+            id integer primary key autoincrement,
+            deck_id integer NOT NULL,
+            desc text NOT NULL,
+            next_show_date text NOT NULL,
+            created_at text NOT NULL,
+            FOREIGN KEY(deck_id) REFERENCES decks(id)
+        )",
             [],
         )
         .unwrap();
 
         conn.execute(
-            "CREATE TABLE if not exists reviews (
-      id integer primary key autoincrement,
-      review_time text NOT NULL,
-      item_id integer NOT NULL,
-      FOREIGN KEY(item_id) REFERENCES items(id)
-    )",
+            "CREATE UNIQUE INDEX IF NOT EXISTS decks_name_key ON decks(name)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "
+        CREATE TABLE if not exists revlog (
+            id integer primary key autoincrement,
+            card_id integer NOT NULL,
+            last_interval integer NOT NULL, -- number of days since last review  
+            interval integer NOT NULL, -- interval until next review
+            review_time text NOT NULL,  -- time of review
+            stability real NOT NULL,
+            difficulty real NOT NULL,
+            FOREIGN KEY(card_id) REFERENCES cards(id)
+        )",
             [],
         )
         .unwrap();
@@ -158,18 +207,39 @@ pub fn data_path() -> PathBuf {
     dir.join("data.sqlite")
 }
 
-impl Item {
-    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Item> {
-        Ok(Item {
+impl Card {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Card> {
+        Ok(Card {
             id: row.get(0)?,
-            desc: row.get(1)?,
+            deck_id: row.get(1)?,
+            deck: row.get(2)?,
+            desc: row.get(3)?,
+            next_show_date: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    }
+}
+
+impl Deck {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Deck> {
+        Ok(Deck {
+            id: row.get(0)?,
+            name: row.get(1)?,
             created_at: row.get(2)?,
-            data: ItemData {
-                repetition: row.get(3)?,
-                interval: row.get(4)?,
-                ease_factor: row.get(5)?,
-                next_show_date: row.get(6)?,
-            },
+        })
+    }
+}
+
+impl Review {
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Review> {
+        Ok(Review {
+            id: row.get(0)?,
+            card_id: row.get(1)?,
+            interval: row.get(2)?,
+            last_interval: row.get(3)?,
+            review_time: row.get(4)?,
+            stability: row.get(5)?,
+            difficulty: row.get(6)?,
         })
     }
 }
