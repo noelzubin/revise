@@ -126,10 +126,10 @@ impl Store for SqliteStore {
 
     fn get_last_review(&self, card_id: ID) -> ReviseResult<Option<Review>> {
         let sql = "
-        SELECT id, card_id, last_interval, interval, review_time, stability, difficulty 
-        FROM revlog 
-        WHERE card_id = $1 
-        ORDER BY id DESC 
+        SELECT id, card_id, last_interval, interval, review_time, stability, difficulty
+        FROM revlog
+        WHERE card_id = $1
+        ORDER BY id DESC
         LIMIT 1
         ";
 
@@ -180,7 +180,7 @@ impl SqliteStore {
         CREATE TABLE if not exists revlog (
             id integer primary key autoincrement,
             card_id integer NOT NULL,
-            last_interval integer NOT NULL, -- number of days since last review  
+            last_interval integer NOT NULL, -- number of days since last review
             interval integer NOT NULL, -- interval until next review
             review_time text NOT NULL,  -- time of review
             stability real NOT NULL,
@@ -202,9 +202,15 @@ pub fn data_dir() -> PathBuf {
     dir
 }
 
-pub fn data_path() -> PathBuf {
+pub fn default_data_path() -> PathBuf {
     let dir = data_dir();
     dir.join("data.sqlite")
+}
+
+pub fn data_path() -> PathBuf {
+    std::env::var("REVISE_DB_PATH_")
+        .map(PathBuf::from)
+        .unwrap_or(default_data_path())
 }
 
 impl Card {
