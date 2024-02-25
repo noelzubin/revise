@@ -208,7 +208,7 @@ pub fn default_data_path() -> PathBuf {
 }
 
 pub fn data_path() -> PathBuf {
-    std::env::var("REVISE_DB_PATH_")
+    std::env::var("REVISE_DB_PATH")
         .map(PathBuf::from)
         .unwrap_or(default_data_path())
 }
